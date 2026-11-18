@@ -1,134 +1,115 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+// Solara Keys - bootstrap, loop, and screen/state management.
+import { STEP, SAVE_KEY } from './config.js';
+import { createInput } from './input.js';
+import { createRenderer, render } from './render.js';
+import { createWorld, updateWorld, startNewGame, saveGame, loadGame, applyShot } from './world.js';
+import { getShotParams, markShotReady } from './shots.js';
+import { audio } from './audio.js';
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
+const input = createInput(canvas);
 const renderer = createRenderer(canvas);
+const shot = getShotParams();
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
+let world;
+if (shot.active) {
+  world = createWorld(shot.seed);
+  applyShot(world, shot.shot, shot.seed);
+} else {
+  world = loadGame(shot.seed) || createWorld(1);
+  world.screen = world.screen === 'wasted' ? 'title' : (world.screen || 'title');
+  if (world.screen !== 'title' && world.screen !== 'playing') world.screen = 'title';
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
-}
+let last = performance.now();
+let acc = 0;
+let shotMarked = false;
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
+function setStatus(text) { if (status) status.textContent = text; }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
+function handleGlobalInput() {
+  const onTitle = world.screen === 'title';
+  const onPause = world.screen === 'paused';
+  const onWasted = world.screen === 'wasted';
+  const onJob = world.screen === 'jobcomplete';
 
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
+  // new game
+  if ((onTitle || onPause || onWasted) && input.wasPressed('n')) {
+    audio.unlock(); audio.click();
+    startNewGame(world, 1);
+    try { localStorage.removeItem(SAVE_KEY); } catch {}
+    world.screen = 'playing';
+    setStatus('New game started in Costa Luna.');
   }
 
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
+  // start/continue
+  const startPressed = input.wasPressed('enter') || input.mouseWasPressed();
+  if (onTitle && startPressed) {
+    audio.unlock(); audio.start();
+    world.screen = 'playing';
+    setStatus('Playing Solara Keys.');
+  } else if (onWasted && startPressed) {
+    audio.unlock(); audio.click();
+    startNewGame(world, world.seed || 1);
+    world.screen = 'playing';
+  } else if (onJob && startPressed) {
+    world.screen = 'playing';
   }
 
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
+  // pause toggle
+  if ((input.wasPressed('escape') || input.wasPressed('p')) && (world.screen === 'playing' || world.screen === 'paused')) {
+    audio.unlock();
+    if (world.screen === 'playing') {
+      world.screen = 'paused';
+      saveGame(world);
+      setStatus('Paused. Game saved.');
     } else {
-      accumulator = 0;
+      world.screen = 'playing';
+      setStatus('Resumed.');
     }
-    renderer.draw(world.state, screen, best);
+  }
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  acc += dt;
+
+  handleGlobalInput();
+
+  while (acc >= STEP) {
+    updateWorld(world, input, STEP);
+    input.endFrame();
+    acc -= STEP;
   }
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
+  render(renderer, world);
 
-  announce('Block Dodger. Press Space or click to start.');
+  if (!shotMarked) {
+    // ensure one painted frame for shots; mark ready after render
+    requestAnimationFrame(() => {
+      if (!shotMarked) {
+        shotMarked = true;
+        if (shot.active) markShotReady({ shot: shot.shot, seed: shot.seed });
+        else window.__gameReady = true;
+      }
+    });
+  }
+
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+window.addEventListener('beforeunload', () => {
+  if (!shot.active && world && world.screen !== 'title') {
+    try { saveGame(world); } catch {}
+  }
+});
+// also save on visibility change when paused/backgrounded
+document.addEventListener('visibilitychange', () => {
+  if (!shot.active && document.hidden && world && world.screen !== 'title') {
+    try { saveGame(world); } catch {}
+  }
+});
+
+requestAnimationFrame(frame);
