@@ -1,134 +1,162 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
+// Solara Keys bootstrap and main loop.
+// Supports ?shot=start|play|drive|wanted&seed=N for deterministic screenshots.
+
+import { STEP, MAX_FRAME, SCREENS, TITLE } from './config.js';
 import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+import { createWorld } from './world.js';
+import { createRenderer } from './render.js';
+import { createInput, ACTION_START, ACTION_PAUSE, ACTION_INTERACT, ACTION_MELEE, ACTION_NEW_GAME } from './input.js';
 import { stageShot } from './shots.js';
-
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
-
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+import { unlockAudio } from './audio.js';
 
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
+const params = new URLSearchParams(window.location.search);
+const shot = params.get('shot');
+const seedParam = parseInt(params.get('seed') || '', 10);
+const seed = Number.isFinite(seedParam) ? (seedParam >>> 0) : ((Math.random() * 0xffffffff) >>> 0);
+
 const renderer = createRenderer(canvas);
+const world = createWorld(seed);
+const input = createInput(canvas);
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
+let hasSave = false;
+if (!shot) {
+  hasSave = world.loadGame();
+  // loadGame sets screen to TITLE when save found; keep hasSave flag for UI
+  if (!hasSave) {
+    world.state.screen = SCREENS.TITLE;
+  } else {
+    world.state.screen = SCREENS.TITLE;
   }
+} else {
+  // Shots must bypass stored save.
+  world.clearSave();
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
+function restartAfterWasted() {
+  // restart run but keep same seed/session feel; simplest is reset world state and go to play
+  const s = world.getSeed();
+  world.resetWorld(s, false);
+  world.state.player.health = 100;
+  world.state.player.alive = true;
+  world.state.player.inVehicleId = null;
+  world.state.wanted.stars = 0;
+  world.state.wanted.heat = 0;
+  world.state.wanted.hiddenTimer = 0;
+  // keep money/mission progress minimal restart: reset mission to beginning for fairness
+  world.state.money = Math.max(0, world.state.money);
+  world.startNewGame(s);
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
+function newGame() {
+  world.clearSave();
+  const s = ((Math.random() * 0xffffffff) >>> 0);
+  world.startNewGame(s);
+  hasSave = false;
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
-
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
+function continueOrStart() {
+  if (world.state.screen === SCREENS.TITLE) {
+    unlockAudio();
+    if (hasSave) {
+      // continue loaded state
+      world.state.screen = SCREENS.PLAY;
+      world.state.message = world.state.message || 'Back in Costa Luna.';
+      world.state.messageTimer = 2.0;
     } else {
-      accumulator = 0;
+      world.state.screen = SCREENS.PLAY;
+      world.state.message = 'Mara Quill: Steal the coupe at Hotel Azure.';
+      world.state.messageTimer = 3.5;
     }
-    renderer.draw(world.state, screen, best);
+  } else if (world.state.screen === SCREENS.WASTED) {
+    unlockAudio();
+    restartAfterWasted();
+  } else if (world.state.screen === SCREENS.COMPLETE) {
+    // allow skipping beat
+    world.state.mission.completeBeat = 0;
+    world.state.screen = SCREENS.PLAY;
   }
+}
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
+function togglePause() {
+  if (world.state.screen === SCREENS.PLAY) {
+    world.state.screen = SCREENS.PAUSE;
+    world.saveGame();
+    hasSave = true;
+  } else if (world.state.screen === SCREENS.PAUSE) {
+    world.state.screen = SCREENS.PLAY;
+  }
+}
+
+function handleActions() {
+  const actions = input.takeActions();
+  if (actions & ACTION_NEW_GAME) {
+    if (world.state.screen === SCREENS.TITLE) {
+      newGame();
     }
-  });
+  }
+  if (actions & ACTION_START) {
+    continueOrStart();
+  }
+  if (actions & ACTION_PAUSE) {
+    if (world.state.screen === SCREENS.PLAY || world.state.screen === SCREENS.PAUSE) togglePause();
+  }
+  if (actions & ACTION_INTERACT) {
+    if (world.state.screen === SCREENS.PLAY) world.interactContext();
+  }
+  if (actions & ACTION_MELEE) {
+    if (world.state.screen === SCREENS.PLAY) world.meleeAttack();
+  }
+}
 
-  announce('Block Dodger. Press Space or click to start.');
+function update(dt) {
+  handleActions();
+  const mouse = input.mouse();
+  const aimWorld = renderer.screenToWorld(mouse.x, mouse.y);
+  // shooting: hold/click mouse while playing and on foot
+  if (world.state.screen === SCREENS.PLAY && mouse.down && !world.state.player.inVehicleId) {
+    world.shoot(aimWorld.x, aimWorld.y);
+  }
+  // consume click as start handled via ACTION_START, but also ensure mouse click can shoot once? shooting uses down
+  input.takeClick();
+
+  if (world.state.screen === SCREENS.PLAY) {
+    world.step(dt, input, aimWorld, true);
+  } else if (world.state.screen === SCREENS.COMPLETE) {
+    world.step(dt, input, aimWorld, false);
+  }
+  // other screens static
+}
+
+let last = performance.now();
+let acc = 0;
+
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, MAX_FRAME);
+  last = now;
+  acc += dt;
+  while (acc >= STEP) {
+    update(STEP);
+    acc -= STEP;
+  }
+  renderer.draw(world, hasSave);
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+window.addEventListener('beforeunload', () => {
+  if (!shot) world.saveGame();
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && world.state.screen === SCREENS.PLAY) {
+    world.state.screen = SCREENS.PAUSE;
+    world.saveGame();
+    hasSave = true;
+  }
+});
+
+if (shot) {
+  // stageShot will paint and set __shotReady
+  stageShot(world, renderer, shot);
+} else {
+  requestAnimationFrame(frame);
+}

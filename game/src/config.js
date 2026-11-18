@@ -1,61 +1,126 @@
-// Every tuning number and colour in one place. The playfield is a fixed 1280x720 logical area;
-// the renderer scales it to the window, so no rule below depends on the screen size.
+// Solara Keys configuration: names, places, tuning, colours and key labels in one place.
+// The city is a fixed logical world drawn in 2D; the camera follows the player.
 
-export const FIELD = { width: 1280, height: 720, groundY: 664 };
+export const TITLE = 'Solara Keys';
+export const CITY_NAME = 'Costa Luna';
+export const FIXER_NAME = 'Mara Quill';
+export const POLICE_NAME = 'Luna PD';
 
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
+export const PLACES = [
+  { id: 'hotel', name: 'Hotel Azure', x: 520, y: 520, w: 220, h: 140, color: '#2b6cb0' },
+  { id: 'marina', name: 'Costa Marina', x: 1560, y: 1180, w: 260, h: 160, color: '#0f766e' },
+  { id: 'park', name: 'Mirador Park', x: 980, y: 860, w: 240, h: 180, color: '#2f855a' },
+  { id: 'heights', name: 'Solara Heights', x: 1640, y: 360, w: 240, h: 180, color: '#805ad5' },
+  { id: 'warehouse', name: 'Warehouse', x: 360, y: 1320, w: 220, h: 150, color: '#744210' },
+  { id: 'dock', name: 'Dock', x: 1180, y: 1480, w: 260, h: 140, color: '#1e3a5f' },
+  { id: 'plaza', name: 'Plaza', x: 1180, y: 520, w: 200, h: 160, color: '#b7791f' },
+];
+
+export const WORLD = { width: 2200, height: 1900 };
+
+export const VIEW = { width: 1280, height: 720 };
+
 export const STEP = 1 / 60;
+export const MAX_FRAME = 0.25;
+
+export const SAVE_KEY = 'solara-keys.save.v1';
+export const BEST_KEY = 'solara-keys.best.v1';
 
 export const PLAYER = {
-  width: 72,
-  height: 24,
-  speed: 560,
-  invulnerable: 1.5,
+  radius: 10,
+  walkSpeed: 150,
+  sprintSpeed: 240,
+  maxHealth: 100,
+  meleeRange: 34,
+  meleeDamage: 28,
+  meleeCooldown: 0.45,
+  shootCooldown: 0.28,
+  bulletSpeed: 760,
+  bulletDamage: 34,
+  bulletRange: 520,
 };
 
-export const LIVES = 3;
-
-export const BLOCK = {
-  minWidth: 40,
-  maxWidth: 110,
-  height: 36,
-  speed: 240,
-  speedPerLevel: 30,
-  speedJitter: 90,
-  interval: 0.55,
-  intervalScale: 0.88,
-  minInterval: 0.14,
-  dodgePoints: 1,
+export const VEHICLE = {
+  width: 42,
+  height: 22,
+  maxSpeed: 320,
+  accel: 220,
+  brake: 300,
+  friction: 90,
+  turnRate: 2.6,
+  handbrakeTurn: 4.2,
+  handbrakeFriction: 260,
+  enterRadius: 46,
 };
 
-export const COIN = {
-  size: 24,
-  speed: 190,
-  speedPerLevel: 14,
-  interval: 1.4,
-  intervalJitter: 0.8,
-  points: 10,
+export const TRAFFIC = {
+  count: 14,
+  speed: 120,
+  maxSpeed: 150,
+  stopDist: 42,
 };
 
-/** Seconds of play per level, and the last level: speeds and spawn rates stop growing there. */
-export const LEVEL = { seconds: 12, max: 12 };
+export const PED = { count: 18, speed: 38, radius: 9 };
 
-/** How many falling things can exist at once; the pool is allocated once, at boot. */
-export const POOL_SIZE = 64;
+export const WANTED = {
+  max: 5,
+  crimeHeat: 18, // heat needed per star step
+  decayHidden: 6, // heat decay per second when hidden
+  decayVisible: 1.5, // slower decay while police can see you
+  sightRange: 420,
+  loseTime: 8, // seconds hidden at low pressure to cool down a star
+  policePerStar: 1,
+  policeShootStar: 3,
+  policeShotCooldown: 1.2,
+};
+
+export const MONEY = { start: 120, deliveryReward: 900, sideJobReward: 350, stealBonus: 150 };
 
 export const PALETTE = {
-  backdrop: '#11141b',
-  sky: '#1b1f2a',
-  ground: '#2a3040',
-  player: '#4fc3f7',
-  block: '#e5534b',
-  coin: '#f2c94c',
-  panel: '#252b38',
+  bg: '#0c1018',
+  road: '#2b3340',
+  roadLine: '#556070',
+  grass: '#16241b',
+  block: '#1f2937',
+  blockEdge: '#334155',
+  water: '#14324a',
+  player: '#f7fafc',
+  ped: '#cbd5e1',
+  pedHit: '#f87171',
+  car: '#60a5fa',
+  carPlayer: '#f2c94c',
+  carPolice: '#3b82f6',
+  carTarget: '#f97316',
   text: '#eef1f5',
-  muted: '#8b93a3',
+  muted: '#9fb0c8',
+  accent: '#4fc3f7',
+  danger: '#ef4444',
+  money: '#86efac',
+  star: '#facc15',
+  panel: 'rgba(15, 23, 42, 0.82)',
+  panelSolid: '#111827',
 };
 
 export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
-/** Where the best score is kept between visits (this browser only). */
-export const BEST_KEY = 'block-dodger.best';
+export const SCREENS = {
+  TITLE: 'title',
+  PLAY: 'play',
+  PAUSE: 'pause',
+  WASTED: 'wasted',
+  COMPLETE: 'complete',
+};
+
+export const CONTROLS_TEXT = [
+  'WASD — move / drive',
+  'Shift — sprint (on foot)',
+  'E — enter / exit / steal car',
+  'Space — handbrake (driving)',
+  'F — melee attack',
+  'Mouse — aim & shoot pistol',
+  'Esc / P — pause',
+  'Enter or Click — start / continue',
+  'N — new game (title)',
+];
+
+export const HUD = { minimapSize: 170, minimapPad: 16 };

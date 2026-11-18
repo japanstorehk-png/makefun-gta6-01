@@ -1,79 +1,110 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Deterministic screenshot scenes for ?shot=start|play|drive|wanted&seed=N.
+// Each scene stages the real world, draws it, and sets window.__shotReady.
+// Shots bypass stored saves.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { SCREENS, WANTED, TITLE } from './config.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
-}
-
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
+function findNearestVehicle(world, pred = () => true) {
+  const { state } = world;
+  let best = null, bestD = Infinity;
+  for (const v of state.vehicles) {
+    if (v.dead) continue;
+    if (!pred(v)) continue;
+    const d = (v.x - state.player.x) ** 2 + (v.y - state.player.y) ** 2;
+    if (d < bestD) { bestD = d; best = v; }
   }
   return best;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export function stageShot(world, renderer, name) {
+  // Bypass save: ensure fresh state for the seed already set by caller.
+  world.clearSave();
+  const { state } = world;
+
+  if (name === 'start') {
+    state.screen = SCREENS.TITLE;
+    state.message = 'Welcome to Costa Luna.';
+    state.messageTimer = 5;
+  } else if (name === 'play') {
+    state.screen = SCREENS.PLAY;
+    state.player.inVehicleId = null;
+    state.message = 'On foot in Costa Luna.';
+    state.messageTimer = 5;
+  } else if (name === 'drive') {
+    state.screen = SCREENS.PLAY;
+    // put player in nearest drivable car
+    let car = findNearestVehicle(world, (v) => v.type !== 'police');
+    if (!car) car = state.vehicles[0];
+    if (car) {
+      car.driver = 'player';
+      state.player.inVehicleId = car.id;
+      state.player.x = car.x; state.player.y = car.y;
+      car.speed = 140;
+    }
+    state.message = 'Driving through Costa Luna.';
+    state.messageTimer = 5;
+  } else if (name === 'wanted') {
+    state.screen = SCREENS.PLAY;
+    state.wanted.stars = 4;
+    state.wanted.heat = WANTED.crimeHeat * 0.5;
+    state.wanted.hiddenTimer = 0;
+    state.wanted.seen = true;
+    // give player a car to make chase readable
+    let car = findNearestVehicle(world, (v) => v.type !== 'police');
+    if (!car) car = state.vehicles[0];
+    if (car) {
+      car.driver = 'player';
+      car.type = 'playercar';
+      state.player.inVehicleId = car.id;
+      state.player.x = car.x; state.player.y = car.y;
+      car.speed = 180;
+    }
+    // ensure police presence and pull some close
+    // spawn/position a few police near player
+    const px = state.player.x, py = state.player.y;
+    let cops = state.vehicles.filter((v) => v.type === 'police' && !v.dead);
+    const need = 4;
+    for (let i = cops.length; i < need; i++) {
+      const n = world.city.randomNode();
+      world.state.vehicles.push({
+        id: world.state.nextId++,
+        x: n.x, y: n.y, angle: 0, speed: 150, vx: 0, vy: 0,
+        type: 'police', color: '#3b82f6', driver: 'police',
+        node: n, prevNodeId: -1, targetNodeId: null, edgeT: 0,
+        hp: 100, dead: false, wantedForMission: false, siren: 0, shootTimer: 0.4,
+      });
+    }
+    cops = state.vehicles.filter((v) => v.type === 'police' && !v.dead);
+    const offsets = [[-180, -120], [200, -80], [-160, 160], [220, 140]];
+    cops.slice(0, offsets.length).forEach((v, i) => {
+      v.x = px + offsets[i][0];
+      v.y = py + offsets[i][1];
+      v.angle = Math.atan2(py - v.y, px - v.x);
+      v.speed = 170;
+      v.dead = false;
+    });
+    state.message = 'Luna PD is on you! Lose the heat.';
+    state.messageTimer = 5;
+  } else {
+    state.screen = SCREENS.TITLE;
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+
+  // advance a little so scene looks alive for play/drive/wanted
+  if (name === 'play' || name === 'drive' || name === 'wanted') {
+    const dt = 1 / 60;
+    for (let i = 0; i < 30; i++) {
+      // tick traffic/police minimally by stepping with no player control input
+      // call step with a dummy input-like object via direct state nudges: easier to use world.step with stub
+      world.step(dt, { axis: () => ({ x: 0, y: 0 }), sprint: () => false, handbrake: () => false }, null, true);
+    }
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+
+  let painted = 0;
+  function paint() {
+    renderer.draw(world, false);
+    painted += 1;
+    if (painted < 2) requestAnimationFrame(paint);
+    else window.__shotReady = true;
+  }
+  requestAnimationFrame(paint);
 }
