@@ -1,0 +1,6 @@
+[
+  { "name": "1-start.jpg", "query": "?shot=start&seed=1", "caption": "Title screen over a living slice of Costa Luna" },
+  { "name": "2-play.jpg", "query": "?shot=play&seed=1", "caption": "On foot at the Hotel Azure, coupe at the kerb" },
+  { "name": "3-drive.jpg", "query": "?shot=drive&seed=1", "caption": "Driving the coupe down a Costa Marina avenue" },
+  { "name": "4-wanted.jpg", "query": "?shot=wanted&seed=1", "caption": "Three stars: Luna PD cruisers closing in" }
+]
